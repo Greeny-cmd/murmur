@@ -45,3 +45,15 @@ test_audio_script.md
 test_audio*.wav
 test_audio*.mp3
 test_integration.py
+
+# ── Murmur v2 ──────────────────────────────────────────
+# local data (kept out of git)
+murmur.log
+*.db
+# writher leftovers (not part of murmur source)
+docs/
+img/
+functions/
+*.spec
+*.egg-info/
+.pytest_cache/

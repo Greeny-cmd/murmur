@@ -1,9 +1,35 @@
-faster-whisper>=1.0.0
+# Murmur v2 — Local Voice Dictation
+# Install:  uv venv .venv && uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+#
+# Run with .venv\Scripts\pythonw.exe (no console) — or .venv\Scripts\python.exe for console/debug.
+
+# ── Core (required) ─────────────────────────────────────────────
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+PyQt6-sip>=13.6.0
 sounddevice>=0.4.6
 numpy>=1.24.0
-pynput>=1.7.6
-pystray>=0.19.0
-Pillow>=10.0.0
-requests>=2.28.0
-winotify>=1.1.0
-customtkinter>=5.2.0
+httpx>=0.25.0
+pynput>=1.7.0
+
+# ── Speech-to-text engines ──────────────────────────────────────
+# faster-whisper (default / recommended) — GPU via CTranslate2 (AMD ROCm / NVIDIA CUDA / CPU).
+faster-whisper>=1.0.0
+# Parakeet (alternative, faster) — via sherpa-onnx (NeMo Parakeet-TDT models).
+sherpa-onnx==1.13.6
+
+# ── Build / test ────────────────────────────────────────────────
+pyinstaller>=6.0          # optional — for building the portable .exe
+pytest>=8.0               # optional
+
+# ── Optional LLM (Rewrite / text cleanup) ───────────────────────
+# Requires a local Ollama server (https://ollama.com) with a model like:
+#   ollama pull gemma2:2b
+# This package list already covers it (httpx is used to talk to Ollama).
+
+# ── AMD ROCm GPU note ─────────────────────────────────────────────
+# For AMD GPUs, faster-whisper/CTranslate2 must use the ROCm build,
+# NOT the stock PyPI wheel. Install the ROCm wheel from the OpenNMT
+# GitHub releases (`rocm-python-wheels-Windows` for cp312), then copy
+# hipblas.dll into site-packages. See README section "ROCm-Unterstützung".
+# For NVIDIA GPUs, use the stock (CUDA) ctranslate2 wheel instead.

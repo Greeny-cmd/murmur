@@ -1,803 +1,669 @@
-import ctypes
-import locale
+"""
+Murmur v2 — Main Application
+
+Local voice dictation tool based on WritHer.
+PyQt6 + Hybrid Design (Material + Apple).
+"""
+
+import sys
 import os
-import queue
-import re
+import asyncio
 import threading
-import time
-import tkinter as tk
+from PyQt6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PyQt6.QtCore import Qt, QTimer, QObject, pyqtSignal
+from PyQt6.QtGui import QIcon, QAction
 
-# Fix DPI awareness before any window is created.
-# CustomTkinter changes the DPI mode which shifts widget positioning.
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(1)   # PROCESS_SYSTEM_DPI_AWARE
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+# Add current directory to path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Use the OS locale for date/time formatting (%x, %X).
-try:
-    locale.setlocale(locale.LC_TIME, "")
-except locale.Error:
-    pass
+from core.recorder import Recorder
+from core.transcriber import create_transcriber, resolve_language
+from core.streaming_transcriber import StreamingTranscriber
+from core.injector import inject, save_recovery
+from core.dictionary import Dictionary
+from core.snippets import SnippetStore
+from core.replacements import apply_replacements, deterministic_clean
+from core import window_target
+from core import keys
+from core.llm_cleanup import cleanup, warm_up
+from core.command_mode import rewrite as command_rewrite
+from core.functions import execute as execute_function
+from core.hotkey import HotkeyListener
+from core import config
+from core import settings_store as store
+from core.logger import log
+from ui.main_window import MainWindow
+from ui.overlay import RecordingOverlay
+from ui.preview import PreviewWindow
+from core import gui_log
+from ui.settings import SettingsWindow
 
-_STOP = object()  # sentinel to shut down pipeline workers
-
-from logger import log
-from recorder import Recorder
-from transcriber import Transcriber
-from injector import inject
-from hotkey import HotkeyListener
-from tray_icon import TrayIcon
-from widget import RecordingWidget
-import assistant
-import config
-import database as db
-import locales
-import notifier
-from notifier import ReminderScheduler
-from notes_window import NotesWindow
-from settings_window import SettingsWindow
-from replacements import apply_replacements
-
-_pipeline_queue   = queue.Queue()
-_assistant_queue  = queue.Queue()
-
-recorder    = Recorder()
-transcriber = None
-tray        = None
-widget      = None
-root        = None
-notes_win   = None
-settings_win = None
-scheduler   = None
-hotkey_listener = None
-
-_quit_requested = threading.Event()
-_shutting_down = False
-
-_rec_start  = 0.0
-_MIN_DURATION = 0.5
-_DELETE_CONFIRM_SECONDS = 15.0
-_DELETE_CONFIRM_TOKEN = re.compile(r"^__confirm_delete__:(note|appointment|reminder):(\d+)$")
-_pending_delete = None
-
-# Toggle-mode timeout timers
-_dict_timeout_timer  = None
-_assist_timeout_timer = None
+_VERBS = ["open", "launch", "start", "go to", "show me", "take me to"]
 
 
-# ── Load persisted settings into config at startup ────────────────────────
+class SignalBridge(QObject):
+    """Bridge for thread-safe GUI updates."""
+    recording_started = pyqtSignal()
+    recording_stopped = pyqtSignal()
+    transcribing = pyqtSignal()
+    completed = pyqtSignal(str)
+    error = pyqtSignal(str)
+    overlay_state = pyqtSignal(str)
+    overlay_text = pyqtSignal(str)
+    overlay_level = pyqtSignal(float)
+    preview_requested = pyqtSignal(str, str, str)
+    preview_result = pyqtSignal(str)
 
-def _load_settings():
-    """Read settings from DB and apply them to config module."""
-    from hotkey_util import str_to_key
 
-    hold = db.get_setting("hold_to_record", "")
-    if hold != "":
-        config.HOLD_TO_RECORD = hold == "1"
-    keep_clip = db.get_setting("keep_transcript_in_clipboard", "")
-    if keep_clip != "":
-        config.KEEP_TRANSCRIPT_IN_CLIPBOARD = keep_clip == "1"
-    max_sec = db.get_setting("max_record_seconds", "")
-    if max_sec != "":
+class MurmurApp:
+    """Main application controller."""
+
+    def __init__(self):
+        self.app = QApplication(sys.argv)
+        self.app.setApplicationName("Murmur")
+        self.app.setOrganizationName("Murmur")
+        
+        # Windows: Set app user model ID for taskbar icon
+        if sys.platform == "win32":
+            import ctypes
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Murmur.VoiceDictation")
+            except Exception:
+                pass
+
+        # Apply stylesheet
+        from ui.design import get_stylesheet
+        self.app.setStyleSheet(get_stylesheet(is_dark=False))
+
+        # Load persisted settings BEFORE creating components
+        store.load_settings()
+
+        # Core components
+        self.recorder = Recorder()
+        self.transcriber = create_transcriber(config.ASR_ENGINE)
+        self.streaming = StreamingTranscriber(self.transcriber)
+        self.dictionary = Dictionary()
+        self.snippets = SnippetStore()
+        self.hotkey_listener = None
+
+        # Transcript history
+        self.transcripts = []
+
+        # UI
+        self.main_window = MainWindow()
+        self.overlay = RecordingOverlay()
+        self.settings_window = None
+        self.tray_icon = None
+
+        # Signal bridge
+        self.signals = SignalBridge()
+        self.signals.recording_started.connect(self._on_recording_started)
+        self.signals.recording_stopped.connect(self._on_recording_stopped)
+        self.signals.transcribing.connect(self._on_transcribing)
+        self.signals.completed.connect(self._on_completed)
+        self.signals.error.connect(self._on_error)
+        self.signals.overlay_state.connect(self._on_overlay_state)
+        self.signals.overlay_text.connect(self._on_overlay_text)
+        self.signals.overlay_level.connect(self._on_overlay_level)
+        self.signals.preview_requested.connect(self._on_preview_requested)
+        self.signals.preview_result.connect(self._on_preview_result)
+
+        # Recording state
+        self._rec_start = 0.0
+        self._recording = False
+        self._last_text = ""
+
+        # Audio level timer
+        self._level_timer = QTimer()
+        self._level_timer.timeout.connect(self._update_level)
+
+        self._setup_ui()
+        self._setup_hotkey()
+        self._setup_tray()
+
+        # Pre-load the Ollama cleanup model in the background so the first
+        # dictation doesn't pay for a cold model load.
+        if config.LLM_CLEANUP_ENABLED:
+            threading.Thread(target=warm_up, daemon=True).start()
+
+        # Pre-load the Whisper STT model in the background so the FIRST
+        # dictation is instantly fast (measured: lazy load = ~1.7s cold).
+        threading.Thread(target=self._preload_transcriber, daemon=True).start()
+
+        # Pre-load the live-preview model too, so enabling live preview gives
+        # real-time words from the very first recording instead of only after
+        # the model loads mid-dictation.
+        if config.LIVE_PREVIEW_ENABLED:
+            threading.Thread(target=self._preload_live_model, daemon=True).start()
+
+    def _preload_live_model(self):
+        """Warm the live-preview Whisper model off the GUI thread."""
         try:
-            config.MAX_RECORD_SECONDS = int(max_sec)
-        except ValueError:
-            pass
-    mic = db.get_setting("mic_device_name", "")
-    if mic != "":
-        config.MIC_DEVICE_NAME = mic if mic != "none" else None
-    ollama_model = db.get_setting("ollama_model", "")
-    if ollama_model:
-        config.OLLAMA_MODEL = ollama_model
-    ollama_url = db.get_setting("ollama_url", "")
-    if ollama_url:
-        config.OLLAMA_URL = ollama_url
-    assistant_provider = db.get_setting("assistant_provider", "")
-    if assistant_provider in {"ollama", "openai"}:
-        config.ASSISTANT_PROVIDER = assistant_provider
-    openai_model = db.get_setting("openai_model", "")
-    if openai_model:
-        config.OPENAI_MODEL = openai_model
-    openai_url = db.get_setting("openai_url", "")
-    if openai_url:
-        config.OPENAI_URL = openai_url
-    whisper = db.get_setting("whisper_model", "")
-    if whisper:
-        config.MODEL_SIZE = whisper
-    lang = db.get_setting("language", "")
-    if lang:
-        config.LANGUAGE = lang
-    wlang = db.get_setting("whisper_language", "")
-    if wlang != "":
-        config.WHISPER_LANGUAGE = None if wlang == "auto" else wlang
+            self.streaming._get_live_model()
+        except Exception as e:
+            log.error("Live-preview model preload failed: %s", e)
 
-    # Hotkeys
-    hk_dict = db.get_setting("hotkey_dictation", "")
-    if hk_dict:
-        parsed = str_to_key(hk_dict)
-        if parsed is not None:
-            config.HOTKEY = parsed
-    hk_assist = db.get_setting("hotkey_assistant", "")
-    if hk_assist:
-        parsed = str_to_key(hk_assist)
-        if parsed is not None:
-            config.ASSISTANT_HOTKEY = parsed
+    def _preload_transcriber(self):
+        """Load the ASR model off the GUI thread so dictations are warm from t0."""
+        try:
+            self.transcriber.load()
+        except Exception as e:
+            log.error("Transcriber preload failed: %s", e)
 
+    def _setup_ui(self):
+        """Setup the main window."""
+        self.main_window.toggle_recording = self.toggle_recording
+        self.main_window.set_settings_callback(self._show_settings)
+        self.main_window.set_dictionary(self.dictionary)
+        # Route logs into the GUI Logs tab
+        gui_log.install_gui_log_handler()
+        self.main_window.set_log_handler(gui_log.get_gui_handler())
 
-# ── Toggle-mode timeout helpers ───────────────────────────────────────────
+    def _setup_hotkey(self):
+        """Setup the hotkey listener."""
+        self.hotkey_listener = HotkeyListener(
+            on_press_cb=self._on_hotkey_press,
+            on_release_cb=self._on_hotkey_release,
+        )
+        self.hotkey_listener.start()
 
-def _start_timeout(mode: str):
-    """Start a safety timer that auto-stops recording in toggle mode."""
-    global _dict_timeout_timer, _assist_timeout_timer
-    if config.HOLD_TO_RECORD:
-        return
-    seconds = getattr(config, "MAX_RECORD_SECONDS", 120)
-    if seconds <= 0:
-        return
-    if mode == "dictation":
-        _dict_timeout_timer = threading.Timer(seconds, _timeout_dictation)
-        _dict_timeout_timer.daemon = True
-        _dict_timeout_timer.start()
-    elif mode == "assistant":
-        _assist_timeout_timer = threading.Timer(seconds, _timeout_assistant)
-        _assist_timeout_timer.daemon = True
-        _assist_timeout_timer.start()
-
-
-def _cancel_timeout(mode: str):
-    global _dict_timeout_timer, _assist_timeout_timer
-    if mode == "dictation" and _dict_timeout_timer is not None:
-        _dict_timeout_timer.cancel()
-        _dict_timeout_timer = None
-    elif mode == "assistant" and _assist_timeout_timer is not None:
-        _assist_timeout_timer.cancel()
-        _assist_timeout_timer = None
-
-
-def _timeout_dictation():
-    log.warning("Toggle-mode dictation timeout reached.")
-    if hotkey_listener:
-        hotkey_listener.force_stop_dictation()
-
-
-def _timeout_assistant():
-    log.warning("Toggle-mode assistant timeout reached.")
-    if hotkey_listener:
-        hotkey_listener.force_stop_assistant()
-
-
-# ── Dictation callbacks (AltGr) ──────────────────────────────────────────
-
-def _on_hotkey_press():
-    global _rec_start
-    _rec_start = time.monotonic()
-    recorder.start()
-    if tray:
-        tray.set_recording(True)
-    if widget:
-        widget.show_recording()
-    _start_timeout("dictation")
-    log.info("Recording started (dictation).")
-
-
-def _on_hotkey_release():
-    _cancel_timeout("dictation")
-    audio = recorder.stop()
-    duration = time.monotonic() - _rec_start
-    if tray:
-        tray.set_recording(False)
-    log.info("Recording stopped (%.2fs).", duration)
-
-    if audio is not None and len(audio) > 0 and duration >= _MIN_DURATION:
-        if widget:
-            widget.show_processing()
-        _pipeline_queue.put(audio)
-    else:
-        if widget:
-            widget.hide()
-        if duration < _MIN_DURATION:
-            log.info("Too short (%.2fs), skipping.", duration)
+        # Second hotkey: Rewrite Selection (hold to speak an instruction)
+        rw = getattr(config, "REWRITE_HOTKEY", 0x91)
+        rw_combo = getattr(config, "REWRITE_COMBO", None)
+        rwc = tuple(rw_combo) if rw_combo else None
+        dict_combo = tuple(config.COMBO_HOTKEY) if config.COMBO_HOTKEY else None
+        # Only start a separate listener when it differs from the dictation hotkey
+        # (single-key vs single-key, or effective combo).
+        dict_single = getattr(config, "HOTKEY", 0xA5)
+        same = False
+        if dict_combo or rwc:
+            same = dict_combo == rwc
         else:
-            log.info("Empty audio, skipping.")
+            same = dict_single == rw
+        if not same:
+            log.info("Rewrite hotkey listener: key=0x%X combo=%s", rw, rwc)
+            self.rewrite_listener = HotkeyListener(
+                on_press_cb=self.start_command_mode,
+                on_release_cb=self.finish_command_mode,
+                key=rw if not rwc else None,
+                combo=rwc,
+            )
+            self.rewrite_listener.start()
+        else:
+            log.info("Rewrite hotkey same as dictation — skipping separate listener")
 
 
-# ── Assistant callbacks (Ctrl+R) ──────────────────────────────────────────
+    def _on_hotkey_press(self):
+        """Handle hotkey press."""
+        self._start_recording()
 
-def _on_assist_press():
-    global _rec_start
-    _rec_start = time.monotonic()
-    recorder.start()
-    if tray:
-        tray.set_recording(True)
-    if widget:
-        widget.show_assistant()
-        widget.set_expression("listening")
-    _start_timeout("assistant")
-    log.info("Recording started (assistant).")
+    def _on_hotkey_release(self):
+        """Handle hotkey release."""
+        self._stop_recording()
 
+    def _setup_tray(self):
+        """Setup system tray icon."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
 
-def _on_assist_release():
-    _cancel_timeout("assistant")
-    audio = recorder.stop()
-    duration = time.monotonic() - _rec_start
-    if tray:
-        tray.set_recording(False)
-    log.info("Assistant recording stopped (%.2fs).", duration)
+        icon_path = os.path.join(os.path.dirname(__file__), "ui", "icons", "murmur.ico")
+        self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self.app)
+        tray_menu = QMenu()
 
-    if audio is not None and len(audio) > 0 and duration >= _MIN_DURATION:
-        if widget:
-            widget.show_processing()
-            widget.set_expression("thinking")
-        _assistant_queue.put(audio)
-    else:
-        if widget:
-            widget.hide()
+        show_action = QAction("Show", self.app)
+        show_action.triggered.connect(self.main_window.show)
+        tray_menu.addAction(show_action)
 
+        settings_action = QAction("Settings", self.app)
+        settings_action.triggered.connect(self._show_settings)
+        tray_menu.addAction(settings_action)
 
-# ── Pipeline workers ──────────────────────────────────────────────────────
+        tray_menu.addSeparator()
 
-def _dictation_worker():
-    """Transcribe audio and paste the result into the active application."""
-    while True:
-        item = _pipeline_queue.get()
-        if item is _STOP:
-            break
+        quit_action = QAction("Quit", self.app)
+        quit_action.triggered.connect(self._quit)
+        tray_menu.addAction(quit_action)
+
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.show()
+
+    def toggle_recording(self):
+        """Toggle recording state."""
+        if self._recording:
+            self._stop_recording()
+        else:
+            self._start_recording()
+
+    def _start_recording(self):
+        """Start recording."""
+        import time
+        self._rec_start = time.monotonic()
+        self._recording = True
+        self.recorder.start()
+        # Freeze the focused window so injected text always lands here
+        # (even if the user clicks elsewhere during the ~1s processing delay)
+        self._target_hwnd = window_target.get_foreground_window()
+        self.signals.recording_started.emit()
+        self.signals.overlay_state.emit("listening")
+        self.signals.overlay_text.emit("")  # Clear old text
+
+        # Optional live preview: only stream when enabled (CPU-hungry)
+        self.recorder.on_audio = None
+        if config.LIVE_PREVIEW_ENABLED:
+            self.recorder.on_audio = self.streaming.feed_audio
+            self.streaming.start(
+                on_partial=self._on_partial_text,
+                initial_prompt=self.dictionary.get_initial_prompt(),
+            )
+        self._level_timer.start(50)
+        log.info("Recording started (live_preview=%s)", config.LIVE_PREVIEW_ENABLED)
+
+    def _stop_recording(self):
+        """Stop recording."""
+        import time
+        duration = time.monotonic() - self._rec_start
+        self._recording = False
+        self.recorder.on_audio = None  # Disconnect audio feed
+        # ALWAYS use the recorder as the source of truth for the final
+        # transcription (mirrors WritHer). The streaming transcriber is ONLY a
+        # parallel live-preview display and must never feed the final result.
+        self.streaming.stop()          # stop live-preview thread (ignore its buffer)
+        audio = self.recorder.stop()
+        self._level_timer.stop()
+        self.signals.recording_stopped.emit()
+        self.signals.overlay_state.emit("processing")
+        log.info("Recording stopped (%.2fs)", duration)
+
+        if audio is not None and len(audio) > 0 and duration >= config.MIN_DURATION:
+            self.signals.transcribing.emit()
+            threading.Thread(target=self._process_audio, args=(audio,), daemon=True).start()
+        else:
+            self.signals.overlay_state.emit("idle")
+            log.info("Too short or empty, skipping")
+
+    def _update_level(self):
+        """Update audio level for overlay."""
+        if self._recording and hasattr(self.recorder, '_frames'):
+            # Simple RMS calculation
+            import numpy as np
+            if self.recorder._frames:
+                last_frame = self.recorder._frames[-1]
+                rms = float(np.sqrt(np.mean(last_frame ** 2)))
+                self.signals.overlay_level.emit(min(1.0, rms * 5))
+
+    def _on_partial_text(self, text: str):
+        """Handle partial transcription text."""
+        log.info("LIVE-PARTIAL: %r", text)
+        self.signals.overlay_text.emit(text)
+
+    def _process_audio(self, audio):
+        """Process audio through the pipeline (runs in background thread)."""
         try:
-            log.info("Transcribing (dictation)...")
-            text = transcriber.transcribe(item)
-            if text:
-                log.debug("Raw: %r", text)
-                text = apply_replacements(text)
-                log.info("Transcribed: %r", text)
-                inject(text)
-            else:
-                log.info("No speech detected.")
-        except Exception as exc:
-            log.error("Dictation pipeline error: %s", exc)
-        finally:
-            if widget:
-                widget.hide()
-
-
-def _parse_delete_token(result: str):
-    m = _DELETE_CONFIRM_TOKEN.match(result or "")
-    if not m:
-        return None
-    return m.group(1), int(m.group(2))
-
-def _run_on_ui_thread(func):
-    """Schedule a Tk/CustomTkinter operation on the Tk main thread."""
-    if root:
-        root.after(0, func)
-
-def _set_pending_delete(kind: str, item_id: int):
-    global _pending_delete
-    _pending_delete = {
-        "kind": kind,
-        "id": item_id,
-        "expires_at": time.monotonic() + _DELETE_CONFIRM_SECONDS,
-    }
-
-    def _open_dialog():
-        try:
-            if not notes_win:
+            # Transcribe
+            initial_prompt = self.dictionary.get_initial_prompt()
+            text = self.transcriber.transcribe(audio, initial_prompt)
+            if not text:
+                self.signals.overlay_state.emit("idle")
                 return
 
-            if not (notes_win._win and notes_win._win.winfo_exists()):
-                notes_win.show("notes")
+            log.info("Raw: %r", text)
+            self.signals.overlay_text.emit(text)
 
-            notes_win.show_voice_delete_confirmation(kind, item_id)
-            log.info("Pending delete dialog opened: %s #%d", kind, item_id)
+            # Apply dictionary
+            text = apply_replacements(text, self.dictionary)
+
+            # Text-expansion snippets: expand spoken trigger words mid-sentence
+            # (e.g. "... to NYC ..." -> "... to New York City ...").
+            if getattr(config, "SNIPPET_EXPANSION_ENABLED", True):
+                from core.snippets import expand_snippets_in_text
+                text, used_triggers = expand_snippets_in_text(text, self.snippets)
+                if used_triggers:
+                    log.info("Snippets expanded in text: %s", ", ".join(used_triggers))
+
+            # Fast deterministic cleanup (fillers, spacing, capitalization)
+            text = deterministic_clean(text)
+
+            # Optional LLM cleanup — only when explicitly enabled (adds latency).
+            # Pass the language Whisper ACTUALLY detected so English stays English
+            # and German stays German (never force the configured default).
+            if config.LLM_CLEANUP_ENABLED:
+                detected_lang = getattr(self.transcriber, "last_detected_language", None)
+                loop = asyncio.new_event_loop()
+                text = loop.run_until_complete(cleanup(text, language=detected_lang))
+                loop.close()
+
+            # Save recovery
+            save_recovery(text)
+
+            # Check for tool-calling (e.g., "open youtube")
+            if config.TOOL_CALLING_ENABLED and text:
+                text = self._try_tool_call(text)
+
+            # Inject — only restore focus if the user switched windows during
+            # the processing delay; the common case already has the right app
+            # focused, so we avoid flaky reactivation that broke injection.
+            target = getattr(self, "_target_hwnd", 0) or 0
+            current = window_target.get_foreground_window()
+            log.info("Injecting (target=%s, current=%s): %r", target, current, text)
+            # Re-activate ONLY if the user switched windows during processing
+            # (common case keeps the right app focused -> no flaky reactivation
+            # that breaks the cursor context). This also covers long LLM
+            # cleanup: if the user clicked away meanwhile, target != current
+            # and we bring the ORIGINAL window back before injecting.
+            if target and current and current != target and window_target.is_valid(target):
+                window_target.activate_window(target)
+            inject(text)
+
+            self._last_text = text
+            # Store transcript for the UI
+            if config.KEEP_HISTORY:
+                from datetime import datetime
+                self.transcripts.insert(0, {
+                    "time": datetime.now().strftime("%H:%M"),
+                    "text": text,
+                })
+                self.main_window.add_transcript(self.transcripts[0])
+            self.signals.completed.emit(text)
+            self.signals.overlay_state.emit("done")
+
+            # Hide overlay after 3 seconds
+            QTimer.singleShot(3000, lambda: self._hide_overlay())
 
         except Exception as exc:
-            log.error("Could not open voice delete dialog: %s", exc)
+            log.error("Pipeline error: %s", exc)
+            self.signals.error.emit(str(exc))
+            self.signals.overlay_state.emit("idle")
 
-    _run_on_ui_thread(_open_dialog)
+    def _try_tool_call(self, text: str) -> str:
+        """Try to match text as a voice command.
 
-    log.info(
-        "Pending delete set: %s #%d (expires in %.1fs)",
-        kind,
-        item_id,
-        _DELETE_CONFIRM_SECONDS,
-    )
+        Returns the original text if no command was matched, or "" if a
+        command was executed (so it is not injected as text).
+        """
+        from core import functions
 
-def _clear_pending_delete():
-    global _pending_delete
-    _pending_delete = None
+        cleaned = text.lower().strip().rstrip(".!?")
 
-def _close_voice_delete_dialog():
-    """Close/hide the voice delete dialog on the Tk main thread."""
-    if not root:
-        return
+        # 1) Explicit verb phrases: "open youtube", "launch calculator", etc.
+        for verb in sorted(_VERBS, key=len, reverse=True):
+            if cleaned.startswith(verb + " "):
+                target = functions.resolve_alias(cleaned[len(verb):].strip())
+                if functions.is_command_enabled(target) and functions.execute(target):
+                    log.info("Command detected: %r -> %s", text, target)
+                    return ""
+                break
 
-    def _close():
+        # 2) Bare command: the ENTIRE utterance resolves to a command
+        #    (single word OR multi-word alias, e.g. "Google docs", "Tox")
+        canonical = functions.resolve_alias(cleaned)
+        if functions.is_command_enabled(canonical) and functions.execute(canonical):
+            log.info("Bare command detected: %r -> %s", text, canonical)
+            return ""
+
+        return text
+
+
+    # ── Command Mode (rewrite selection) ─────────────────────────────
+
+    def start_command_mode(self):
+        """Start command mode: capture the focused selection, then record an instruction."""
+        import time
+        self._command_recording = False
+
+        # Capture the focused app's selection into the clipboard (retry a few times)
+        from PyQt6.QtWidgets import QApplication
+        clip = QApplication.clipboard()
+        self._cmd_selection = ""
+        for attempt in range(3):
+            try:
+                keys.copy_selection()
+                time.sleep(0.2)
+                self._cmd_selection = clip.text() or ""
+            except Exception as e:
+                log.error("Command selection capture failed: %s", e)
+            if self._cmd_selection.strip():
+                break
+
+        if not self._cmd_selection.strip():
+            log.warning("Rewrite: no selection captured from focused app")
+            self.main_window.status_label.setText("No text selected — select text, then retry Rewrite.")
+            self.signals.overlay_text.emit("No text selected — re-select and retry Rewrite")
+            self.signals.overlay_state.emit("done")
+            QTimer.singleShot(3000, self._hide_overlay)
+            return
+
+        # Start recording the spoken instruction
+        self._command_recording = True
+        self._rec_start = time.monotonic()
+        self._recording = True
+        self.recorder.start()
+        self.recorder.on_audio = self.streaming.feed_audio
+        self.streaming.start(on_partial=self._on_partial_text)
+        self._level_timer.start(50)
+        self.signals.overlay_state.emit("listening")
+        self.signals.overlay_text.emit("")
+        self.main_window.status_label.setText("Speak an instruction (e.g. 'make this more formal')…")
+        log.info("Command mode: recording instruction")
+
+    def finish_command_mode(self):
+        """Transcribe the instruction, rewrite, and show a preview."""
         try:
-            if notes_win and notes_win._voice_delete_dialog:
-                dialog = notes_win._voice_delete_dialog
-                notes_win._voice_delete_dialog = None
-                notes_win._safe_destroy_dialog(dialog)
-        except Exception as exc:
-            log.error("Could not close voice delete dialog: %s", exc)
-
-    root.after(0, _close)
-
-
-def _matches_locale_choice(text: str, key: str) -> bool:
-    t = " ".join((text or "").strip().lower().split())
-    if not t:
-        return False
-
-    choices = [
-        " ".join(choice.strip().lower().split())
-        for choice in locales.get_choices(key)
-        if choice.strip()
-    ]
-    if not choices:
-        return False
-
-    alternatives = "|".join(re.escape(choice) for choice in choices)
-    pattern = rf"(?<!\w)(?:{alternatives})(?!\w)"
-    return bool(re.search(pattern, t))
-
-
-def _is_affirmative(text: str) -> bool:
-    return _matches_locale_choice(text, "delete_confirmations")
-
-
-def _is_negative(text: str) -> bool:
-    return _matches_locale_choice(text, "delete_rejections")
-
-
-def _refresh_notes_window_if_open():
-    if notes_win and notes_win._win and notes_win._win.winfo_exists():
-        root.after(0, notes_win._refresh)
-
-
-def _delete_by_pending(kind: str, item_id: int) -> str:
-    if kind == "note":
-        title = locales.get("default_note_title")
-        for note in db.get_all_notes():
-            if note["id"] == item_id:
-                title = note["title"] or title
-                break
-        else:
-            return locales.get("delete_item_missing", item=locales.get("delete_item_note"))
-        db.delete_note(item_id)
-        _refresh_notes_window_if_open()
-        return locales.get("note_deleted", title=title, nid=item_id)
-
-    if kind == "appointment":
-        title = None
-        for appointment in db.get_appointments():
-            if appointment["id"] == item_id:
-                title = appointment["title"]
-                break
-        if title is None:
-            return locales.get("delete_item_missing", item=locales.get("delete_item_appointment"))
-        db.delete_appointment(item_id)
-        _refresh_notes_window_if_open()
-        return locales.get("appointment_deleted", title=title, aid=item_id)
-
-    if kind == "reminder":
-        message = None
-        for reminder in db.get_all_reminders(include_notified=True):
-            if reminder["id"] == item_id:
-                message = reminder["message"]
-                break
-        if message is None:
-            return locales.get("delete_item_missing", item=locales.get("delete_item_reminder"))
-        db.delete_reminder(item_id)
-        _refresh_notes_window_if_open()
-        return locales.get("reminder_deleted", message=message, rid=item_id)
-
-    return locales.get("error", detail=f"Unsupported delete kind: {kind}")
-
-
-def _handle_pending_delete_confirmation(text: str):
-    if _pending_delete is None:
-        return None
-
-    now = time.monotonic()
-    if now > _pending_delete["expires_at"]:
-        log.info("Pending delete expired.")
-        _close_voice_delete_dialog()
-        _clear_pending_delete()
-        return "__delete_confirm_timeout__"
-
-    if _is_affirmative(text):
-        kind = _pending_delete["kind"]
-        item_id = _pending_delete["id"]
-        _close_voice_delete_dialog()
-        _clear_pending_delete()
-        return _delete_by_pending(kind, item_id)
-
-    if _is_negative(text):
-        _close_voice_delete_dialog()
-        _clear_pending_delete()
-        return "__delete_cancelled__"
-
-    remaining = int(max(1, _pending_delete["expires_at"] - now))
-    return f"__delete_confirm_repeat__:{remaining}"
-
-
-def _assistant_worker():
-    """Transcribe audio, send it to the local LLM, and execute its action."""
-    while True:
-        item = _assistant_queue.get()
-        if item is _STOP:
-            break
+            # Use the proven recorder path (same as dictation) for the
+            # instruction audio; streaming.stop() tended to return empty.
+            audio = self.recorder.stop()
+        except Exception:
+            audio = None
+        # stop any live-preview streaming thread (its audio is not used here)
         try:
-            log.info("Transcribing (assistant)...")
-            text = transcriber.transcribe(item)
-            if not text:
-                log.info("No speech detected.")
-                if widget:
-                    widget.hide()
-                continue
+            self.streaming.stop()
+        except Exception:
+            pass
+        self.recorder.on_audio = None
+        self._level_timer.stop()
+        self.signals.overlay_state.emit("idle")
+        self._command_recording = False
 
-            log.info("Assistant heard: %r", text)
-            result = _handle_pending_delete_confirmation(text)
-            if result is None:
-                if not assistant.ping_provider():
-                    provider = getattr(config, "ASSISTANT_PROVIDER", "ollama")
-                    url = (config.OPENAI_URL if provider == "openai"
-                           else config.OLLAMA_URL)
-                    log.warning("Assistant provider %s unreachable at %s — "
-                                "aborting assistant call.", provider, url)
-                    notifier.notify(
-                        locales.get("assistant_unreachable_title"),
-                        locales.get("assistant_unreachable_body"),
+        if audio is None or len(audio) < 1:
+            self.main_window.status_label.setText("Nothing recorded. Try again.")
+            return
+
+        # Transcribe the instruction
+        try:
+            instruction = self.transcriber.transcribe(audio, self.dictionary.get_initial_prompt())
+        except Exception as e:
+            instruction = ""
+            log.error("Command instruction transcription failed: %s", e)
+
+        if not instruction:
+            self.main_window.status_label.setText("Couldn't hear the instruction.")
+            return
+        log.info("Command instruction: %r", instruction)
+
+        # Rewrite via local LLM
+        self.main_window.status_label.setText("Rewriting…")
+        try:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            from core.transcriber import resolve_language
+            rewritten = loop.run_until_complete(command_rewrite(self._cmd_selection, instruction, language=resolve_language()))
+            loop.close()
+        except Exception as e:
+            log.error("Rewrite failed: %s", e)
+            rewritten = self._cmd_selection
+
+        self.signals.preview_requested.emit(self._cmd_selection, instruction, rewritten)
+
+    def _on_preview_requested(self, original, instruction, rewritten):
+        # Runs on the GUI thread (queued via the signal)
+        self._show_command_preview(original, instruction, rewritten)
+
+    def _show_command_preview(self, original: str, instruction: str, rewritten: str):
+        """Show a non-modal preview with Apply/Undo/Close (stays open)."""
+        win = PreviewWindow(self.main_window)
+        win.set_original(original)
+        win.set_instruction(instruction)
+        win.set_status("")
+        win.set_rewritten(rewritten)
+        win.set_apply_callback(lambda text: self._apply_text_to_selection(text))
+        win.set_regen_callback(lambda instr: self._regen_preview(instr))
+        # keep a reference so the window isn't garbage-collected
+        self._cmd_preview = win
+        win.show()
+        win.raise_()
+        self.main_window.status_label.setText("Preview: Apply / Undo / Close")
+        log.info("Command-mode preview shown")
+
+    def _regen_preview(self, instruction: str):
+        """Re-run the rewrite for a new instruction, off the GUI thread."""
+        if not instruction:
+            self.signals.preview_result.emit("<Enter an instruction first>")
+            return
+        original = getattr(self, "_cmd_selection", "") or ""
+
+        def worker():
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(
+                        command_rewrite(original, instruction, language=resolve_language())
                     )
-                    if widget:
-                        widget.set_expression("error")
-                        widget.show_message(
-                            locales.get("assistant_unreachable_body"), 3000)
-                    continue
-                result = assistant.process(text)
-            log.info("Assistant result: %s", result)
+                finally:
+                    loop.close()
+            except Exception as e:
+                log.error("Re-rewrite failed: %s", e)
+                result = self._cmd_selection
+            self.signals.preview_result.emit(result or "")
 
-            token = _parse_delete_token(result)
-            if token:
-                kind, item_id = token
-                _set_pending_delete(kind, item_id)
-                if widget:
-                    widget.set_expression("listening")
-                    widget.show_message(
-                        locales.get(
-                            "delete_confirm_prompt",
-                            item=locales.get(f"delete_item_{kind}"),
-                            seconds=int(_DELETE_CONFIRM_SECONDS),
-                        ),
-                        2200,
-                    )
-                continue
+        threading.Thread(target=worker, daemon=True).start()
 
-            # Handle special show commands
-            if result == "__delete_confirm_timeout__":
-                if widget:
-                    widget.set_expression("sad")
-                    widget.show_message(locales.get("delete_confirm_timeout"), 2200)
-            elif result == "__delete_cancelled__":
-                if widget:
-                    widget.set_expression("sad")
-                    widget.show_message(locales.get("delete_cancelled"), 2200)
-            elif result.startswith("__delete_confirm_repeat__:"):
-                remaining = int(result.rsplit(":", 1)[1])
-                if widget:
-                    widget.set_expression("listening")
-                    widget.show_message(locales.get("delete_confirm_repeat", seconds=remaining), 2200)
-            elif result == "__show_notes__":
-                if notes_win:
-                    root.after(0, lambda: notes_win.show("notes"))
-                if widget:
-                    widget.set_expression("happy")
-                    widget.show_message(locales.get("show_notes"), 2000)
-            elif result == "__show_appointments__":
-                if notes_win:
-                    root.after(0, lambda: notes_win.show("appointments"))
-                if widget:
-                    widget.set_expression("happy")
-                    widget.show_message(locales.get("show_appointments"), 2000)
-            elif result == "__show_reminders__":
-                if notes_win:
-                    root.after(0, lambda: notes_win.show("reminders"))
-                if widget:
-                    widget.set_expression("happy")
-                    widget.show_message(locales.get("show_reminders"), 2000)
-            elif result == locales.get("not_understood") or result.startswith(locales.get("error", detail="")):
-                if widget:
-                    widget.set_expression("sad")
-                    widget.show_message("✗", 2000)
-            else:
-                if widget:
-                    widget.set_expression("happy")
-                    widget.show_message("✓", 2000)
+    def _on_preview_result(self, new_rewritten: str):
+        # Runs on the GUI thread (queued via the signal)
+        win = getattr(self, "_cmd_preview", None)
+        if win is not None:
+            win.set_rewritten(new_rewritten)
+            win.set_status("Updated.")
 
-        except Exception as exc:
-            log.error("Assistant pipeline error: %s", exc)
-            if widget:
-                widget.set_expression("error")
-                widget.show_message(locales.get("assistant_error"), 2000)
-
-
-# ── Quit & Main ───────────────────────────────────────────────────────────
-
-def _show_notes():
-    """Open notes window from tray menu."""
-    if notes_win:
-        root.after(0, lambda: notes_win.show("notes"))
-
-
-def _show_settings():
-    """Open settings window from tray menu."""
-    if settings_win:
-        root.after(0, lambda: settings_win.show())
-
-
-def _request_quit():
-    """Receive a tray-thread request without calling Tk from that thread."""
-    _quit_requested.set()
-
-
-def _shutdown_requested() -> bool:
-    """Return True as soon as shutdown is requested or has begun."""
-    return _quit_requested.is_set() or _shutting_down
-
-
-def _poll_quit_request():
-    """Run shutdown on Tk's main thread when the tray requests it."""
-    if _quit_requested.is_set():
-        _quit()
-        return
-    if root:
-        root.after(50, _poll_quit_request)
-
-
-def _force_exit():
-    """Watchdog: kill the process if Tk fails to wind down after a quit.
-
-    root.destroy() can raise (e.g. TclError from CustomTkinter windows
-    torn down mid-callback); if that happens the mainloop never returns
-    and the process survives as an invisible ghost holding the
-    single-instance mutex. Five seconds after a quit request, exit
-    unconditionally.
-    """
-    log.warning("Force-exit watchdog fired: Tk did not shut down cleanly.")
-    os._exit(0)
-
-
-def _quit():
-    global _shutting_down
-    if _shutting_down:
-        return
-    _shutting_down = True
-    log.info("Quitting...")
-    watchdog = threading.Timer(5.0, _force_exit)
-    watchdog.daemon = True
-    watchdog.start()
-    _cancel_timeout("dictation")
-    _cancel_timeout("assistant")
-    _pipeline_queue.put(_STOP)
-    _assistant_queue.put(_STOP)
-    if scheduler:
-        scheduler.stop()
-    if hotkey_listener:
+    def _apply_text_to_selection(self, text: str):
+        """Replace the current selection with the given text (target-window locked)."""
+        from PyQt6.QtWidgets import QApplication
+        import time
+        target = getattr(self, "_target_hwnd", 0) or 0
+        if target:
+            try:
+                window_target.try_restore_to(target)
+            except Exception:
+                pass
+        time.sleep(0.05)
         try:
-            hotkey_listener.stop()
-        except Exception:
-            pass
-    if tray:
-        try:
-            tray.stop()
-        except Exception:
-            pass
-    try:
-        recorder.stop()
-    except Exception:
-        pass
-    # Hide child windows immediately, then destroy root after event queue drains
-    if root:
-        try:
-            if notes_win and notes_win._win and notes_win._win.winfo_exists():
-                notes_win._win.withdraw()
-            if settings_win and settings_win._win and settings_win._win.winfo_exists():
-                settings_win._win.withdraw()
-        except Exception:
-            pass
-        try:
-            root.after(50, _destroy_root)
-        except Exception:
-            _destroy_root()
+            # selection is still active in the target app, so a plain paste replaces it
+            QApplication.clipboard().setText(text)
+            keys.paste()
+        except Exception as e:
+            log.error("Apply rewrite failed: %s", e)
+        self.main_window.status_label.setText("Applied.")
+        log.info("Applied rewrite: %r", text)
 
+    # ── Signal handlers (run on GUI thread) ──────────────────────────
 
-def _destroy_root():
-    """Destroy root after pending Tk events have been processed."""
-    try:
-        root.destroy()
-    except Exception as exc:
-        log.error("Root destroy failed: %s — stopping mainloop instead.", exc)
-        try:
-            root.quit()
-        except Exception:
-            pass  # the _quit watchdog will force the exit
-    log.info("Shutdown complete.")
+    def _position_overlay(self):
+        """Center the overlay near the bottom of the primary screen."""
+        from PyQt6.QtGui import QGuiApplication
+        # Force a native window handle so position stores correctly on first run.
+        self.overlay.winId()
+        screen = QGuiApplication.primaryScreen().geometry()
+        ow, oh = self.overlay.width(), self.overlay.height()
+        overlay_x = (screen.width() - ow) // 2
+        overlay_y = screen.height() - 120  # 120px from bottom
+        self.overlay.move(overlay_x, overlay_y)
 
+    def _on_recording_started(self):
+        self.main_window.start_recording()
+        # Position overlay at screen center-bottom (like WritHer)
+        self._position_overlay()
 
-def _acquire_instance_lock():
-    """Return a Win32 mutex handle if this is the first instance, else exit."""
-    import ctypes
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "Local\\WritHerSingleInstance")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        log.error("Another instance of WritHer is already running. Exiting.")
-        try:
-            notifier.notify(
-                locales.get("already_running_title"),
-                locales.get("already_running_body"),
-            )
-        except Exception:
-            pass
-        raise SystemExit(1)
-    return mutex  # keep reference so it isn't garbage-collected
+    def _on_recording_stopped(self):
+        self.main_window.stop_recording()
 
+    def _on_transcribing(self):
+        self.main_window.status_label.setText("Processing...")
 
-def _whisper_model_is_cached(size: str) -> bool:
-    """Return True if the faster-whisper model is fully on disk.
+    def _on_completed(self, text: str):
+        self.main_window.status_label.setText("Ready")
 
-    Mirrors huggingface_hub's cache resolution (HF_HUB_CACHE / HF_HOME /
-    default ~/.cache/huggingface/hub). "Fully" matters: an interrupted
-    first download leaves *.incomplete blobs and a snapshot without the
-    weights — treating that as cached made startup claim "Loading" while
-    it was actually re-downloading (looked stuck, see issue #16 report).
-    """
-    hub = os.environ.get("HF_HUB_CACHE")
-    if not hub:
-        hf_home = os.environ.get("HF_HOME") or os.path.join(
-            os.path.expanduser("~"), ".cache", "huggingface")
-        hub = os.path.join(hf_home, "hub")
-    model_dir = os.path.join(hub, f"models--Systran--faster-whisper-{size}")
+    def _on_error(self, error: str):
+        self.main_window.status_label.setText(f"Error: {error}")
+        self.signals.overlay_state.emit("idle")
 
-    try:
-        snapshots = [e.path for e in os.scandir(
-            os.path.join(model_dir, "snapshots")) if e.is_dir()]
-    except OSError:
-        return False
-    if not snapshots:
-        return False
+    def _on_overlay_state(self, state: str):
+        self.overlay.set_state(state)
 
-    # A partially downloaded model leaves *.incomplete files in blobs/.
-    try:
-        if any(e.name.endswith(".incomplete")
-               for e in os.scandir(os.path.join(model_dir, "blobs"))):
-            return False
-    except OSError:
-        pass
+    def _on_overlay_text(self, text: str):
+        self.overlay.set_text(text)
 
-    # The actual weights must be present in at least one snapshot.
-    return any(os.path.exists(os.path.join(snap, "model.bin"))
-               for snap in snapshots)
+    def _on_overlay_level(self, level: float):
+        self.overlay.set_level(level)
 
+    def _hide_overlay(self):
+        """Hide the overlay."""
+        self.overlay.hide()
+        self.overlay._visible = False
+        self.overlay._opacity = 0.0
 
-def _finish_startup():
-    """Load the Whisper model and start the pipelines.
+    def _show_settings(self):
+        if self.settings_window is None:
+            self.settings_window = SettingsWindow()
+            # Warm the live-preview model as soon as live preview is toggled ON,
+            # so the FIRST recording after enabling shows live words instead of
+            # "Listening" while the model lazily loads (~4s).
+            self.settings_window.on_live_preview_enabled = self._preload_live_model
+        self.settings_window.show()
 
-    Runs on a background thread so the Tk mainloop can paint the widget
-    while the model loads — on first launch the download takes minutes,
-    and without visible feedback the app looks dead.
-    """
-    global transcriber, scheduler, hotkey_listener
-    from hotkey_util import key_display_name
+    def _quit(self):
+        """Quit the application."""
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+        # Unload the LLM model from VRAM if we loaded it (keep it from running
+        # in the background after Murmur closes).
+        if config.LLM_CLEANUP_ENABLED:
+            try:
+                from core.llm_cleanup import unload_model
+                unload_model()
+            except Exception as exc:
+                log.debug("Unload on quit skipped: %s", exc)
+        self.app.quit()
 
-    downloading = not _whisper_model_is_cached(config.MODEL_SIZE)
-    widget.show_status(locales.get(
-        "model_downloading" if downloading else "model_loading"))
-    log.info("Model '%s' cached: %s", config.MODEL_SIZE, not downloading)
+    def run(self):
+        """Run the application."""
+        self._position_overlay()
+        self.main_window.show()
 
-    try:
-        # Fully cached -> load straight from disk, no network: a slow or
-        # blocked connection to huggingface.co must not hang startup.
-        transcriber = Transcriber(local_files_only=not downloading)
-    except Exception as exc:
-        log.error("Whisper model load failed: %s", exc)
-        widget.show_status(locales.get("model_error"), expression="error")
-        notifier.notify(
-            locales.get("model_error_title"),
-            locales.get("model_error_body"),
-        )
-        return  # tray stays alive so the user can read the toast and quit
+        # Show first-run onboarding wizard once the loop is up
+        if not config.ONBOARDING_DONE:
+            try:
+                from ui.onboarding import OnboardingWizard
+                QTimer.singleShot(600, self._show_onboarding)
+            except Exception as e:
+                log.error("Onboarding wizard error: %s", e)
 
-    if _shutdown_requested():
-        log.info("Startup cancelled after model load: shutdown requested.")
-        return
-    scheduler = ReminderScheduler()
-    scheduler.start()
+        return self.app.exec()
 
-    if _shutdown_requested():
-        scheduler.stop()
-        scheduler = None
-        return
-    t1 = threading.Thread(target=_dictation_worker, daemon=True)
-    t1.start()
-    t2 = threading.Thread(target=_assistant_worker, daemon=True)
-    t2.start()
-
-    if _shutdown_requested():
-        return
-    hotkey_listener = HotkeyListener(
-        on_press_cb=_on_hotkey_press,
-        on_release_cb=_on_hotkey_release,
-        on_assist_press_cb=_on_assist_press,
-        on_assist_release_cb=_on_assist_release,
-    )
-    hotkey_listener.start()
-
-    if _shutdown_requested():
-        hotkey_listener.stop()
-        hotkey_listener = None
-        return
-    dict_key = key_display_name(config.HOTKEY)
-    # Wording must match the configured recording mode: "hold" is wrong
-    # (and misleading) when the user has toggle mode enabled.
-    rec_mode = "hold" if config.HOLD_TO_RECORD else "toggle"
-    widget.set_expression("happy")
-    widget.show_message(
-        locales.get(f"startup_ready_{rec_mode}", hotkey=dict_key), 3500)
-
-    if db.get_setting("welcome_shown", "") != "1":
-        notifier.notify(
-            locales.get("welcome_title"),
-            locales.get(
-                f"welcome_body_{rec_mode}",
-                dict_key=dict_key,
-                assist_key=key_display_name(config.ASSISTANT_HOTKEY),
-            ),
-        )
-        db.save_setting("welcome_shown", "1")
-
-    log.info("Ready. %s=dictate, %s=assistant.",
-             dict_key, key_display_name(config.ASSISTANT_HOTKEY))
+    def _show_onboarding(self):
+        """Show the onboarding wizard (if applicable)."""
+        from ui.onboarding import OnboardingWizard
+        wizard = OnboardingWizard(self.main_window)
+        wizard.exec()
+        # Refresh hotkey listener in case wizard changed it
+        if self.hotkey_listener:
+            self.hotkey_listener.stop()
+        self._setup_hotkey()
 
 
 def main():
-    global tray, widget, root, notes_win, settings_win
-
-    _mutex = _acquire_instance_lock()
-
-    db.init()
-    _load_settings()
-
-    root = tk.Tk()
-    root.withdraw()
-
-    widget = RecordingWidget(root)
-    notes_win = NotesWindow(root)
-    settings_win = SettingsWindow(root)
-
-    recorder.on_level = lambda rms: widget.update_level(min(1.0, rms * 8))
-    recorder.on_mic_error = lambda msg: widget.show_message(msg, 4000)
-
-    tray = TrayIcon(on_quit=_request_quit, on_show_notes=_show_notes,
-                    on_show_settings=_show_settings)
-    tray.start()
-    tray.set_tooltip(locales.get("tray_idle"))
-
-    threading.Thread(target=_finish_startup, daemon=True).start()
-
-    root.after(50, _poll_quit_request)
-    root.mainloop()
-
-    # Belt and braces: pystray's run_detached() thread is non-daemon and can
-    # survive icon.stop(), leaving a ghost process that keeps holding the
-    # single-instance mutex ("already running" with no tray icon). Give
-    # stragglers a moment to finish, then force the process to exit.
-    for t in threading.enumerate():
-        if t is not threading.current_thread() and not t.daemon:
-            t.join(timeout=2.0)
-    log.info("Process exit.")
-    os._exit(0)
+    """Entry point."""
+    log.info("Starting Murmur v2")
+    murmur = MurmurApp()
+    sys.exit(murmur.run())
 
 
 if __name__ == "__main__":
