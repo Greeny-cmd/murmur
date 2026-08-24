@@ -222,7 +222,7 @@ class MurmurApp:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
 
-        icon_path = os.path.join(config._bundled_dir(), "ui", "icons", "murmur.ico") if getattr(sys, "frozen", False) else os.path.join(os.path.dirname(__file__), "..", "ui", "icons", "murmur.ico")
+        icon_path = config.icon_path("murmur.ico")
         self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self.app)
         tray_menu = QMenu()
 
