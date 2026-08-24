@@ -23,7 +23,7 @@
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Features
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Features
 
 - **Dictate at the cursor** — Hold the dictation key (default **AltGr**), speak, and the text is inserted into the focused window via Win32 clipboard injection.
 - **Live transcription** — See your words appear in real time in the overlay while you speak (optional, enable in Settings).
@@ -41,7 +41,7 @@
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Requirements
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Requirements
 
 | Component | Requirement |
 |---|---|
@@ -56,7 +56,7 @@
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Install & run (from source)
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Install & run (from source)
 
 ```bash
 git clone https://github.com/Greeny-cmd/murmur.git
@@ -79,7 +79,7 @@ python -m venv .venv
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Hotkeys (defaults)
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Hotkeys (defaults)
 
 | Action | Key | Description |
 |---|---|---|
@@ -89,7 +89,7 @@ python -m venv .venv
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> ROCm support (AMD GPUs)
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> ROCm support (AMD GPUs)
 
 **Murmur supports AMD GPUs natively via ROCm.** Tested with an **AMD Radeon RX 9070 (16 GB)** on Windows 11.
 
@@ -108,7 +108,7 @@ The GPU is detected automatically at startup (`Whisper model loaded on cuda`). I
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Tested hardware
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Tested hardware
 
 | Component | System |
 |---|---|
@@ -120,7 +120,7 @@ The GPU is detected automatically at startup (`Whisper model loaded on cuda`). I
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Tech stack
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Tech stack
 
 - **PyQt6** — GUI (Google Material design system)
 - **faster-whisper** (CTranslate2) — speech-to-text (AMD ROCm / NVIDIA CUDA / CPU)
@@ -130,7 +130,7 @@ The GPU is detected automatically at startup (`Whisper model loaded on cuda`). I
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> Tests
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> Tests
 
 ```bash
 .venv/Scripts/python.exe -m pytest
@@ -138,7 +138,7 @@ The GPU is detected automatically at startup (`Whisper model loaded on cuda`). I
 
 ---
 
-## <img src="assets/section-icon.png" width="22" align="center"> License
+## <img src="assets/section-icon.png" width="22" align="center" style="position: relative; top: -12px;"> License
 
 [MIT](LICENSE) — free for personal & commercial use.
 
