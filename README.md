@@ -15,6 +15,10 @@
 
 [🔗 Releases & all downloads](https://github.com/Greeny-cmd/murmur/releases)
 
+**Enjoying Murmur?** ☕ [**Buy me a coffee**](https://ko-fi.com/greenycmd) or [**send a tip**](https://paypal.me/Nguyen3000) — it keeps local, offline software alive. 💙
+
+[![Support](https://img.shields.io/badge/❤️_Support_this_project-Donate-b1954b?logo=kofi&logoColor=white&labelColor=%23305E8C)](https://ko-fi.com/greenycmd)
+
 </div>
 
 ---
