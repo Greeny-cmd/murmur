@@ -1,0 +1,9 @@
+# Normalize line endings: LF in the repo, CRLF only when checked out on Windows.
+* text=auto
+
+# Explicit binary
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
+*.whl binary
