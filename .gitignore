@@ -55,5 +55,6 @@ docs/
 img/
 functions/
 *.spec
+!murmur.spec
 *.egg-info/
 .pytest_cache/
