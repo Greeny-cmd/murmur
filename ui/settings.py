@@ -128,7 +128,7 @@ class SettingsWindow(QMainWindow):
                 self.resize(780, 820)
         except Exception:
             self.resize(780, 820)
-        icon_path = os.path.join(os.path.dirname(__file__), "icons", "murmur.ico")
+        icon_path = config.icon_path("murmur.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
@@ -148,7 +148,7 @@ class SettingsWindow(QMainWindow):
         # Title with M-logos
         title_row = QHBoxLayout()
         logo_lbl = QLabel()
-        logo_path = os.path.join(os.path.dirname(__file__), "icons", "murmur.png")
+        logo_path = config.icon_path("murmur.png")
         if os.path.exists(logo_path):
             logo_lbl.setPixmap(QPixmap(logo_path).scaled(
                 30, 30, Qt.AspectRatioMode.KeepAspectRatio,
@@ -945,7 +945,7 @@ class SettingsWindow(QMainWindow):
             rm.setFixedSize(34, 34)
             _red = DesignTokens.Light.ERROR
             # Use a pre-generated white cross icon (text glyphs render unreliably).
-            _x_p = os.path.join(os.path.dirname(__file__), "icons", "delete_x.png")
+            _x_p = config.icon_path("delete_x.png")
             if os.path.exists(_x_p):
                 from PyQt6.QtGui import QIcon
                 rm.setIcon(QIcon(_x_p))

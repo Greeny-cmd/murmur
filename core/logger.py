@@ -4,7 +4,23 @@ Logger — simple logging setup.
 
 import logging
 import os
+import sys
 from core import config
+
+
+def _fix_windowed_stdio():
+    """Windowed (PyInstaller) builds set sys.stdout/stderr to None.
+
+    logging.StreamHandler() needs a real file object; None crashes it silently.
+    Route to os.devnull so logging works identically in console & windowed modes.
+    """
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
+_fix_windowed_stdio()
 
 # Setup logging
 log = logging.getLogger("murmur")

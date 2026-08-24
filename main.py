@@ -32,6 +32,22 @@ from core.hotkey import HotkeyListener
 from core import config
 from core import settings_store as store
 from core.logger import log
+
+# Windowed (PyInstaller) apps swallow fatal errors with no traceback. Send them
+# to the log file so frozen crashes are diagnosable.
+import traceback as _tb
+
+
+def _frozen_excepthook(etype, value, tb):
+    try:
+        log.error("Unhandled exception:\n%s", "".join(_tb.format_exception(etype, value, tb)))
+    except Exception:
+        pass
+    sys.__excepthook__(etype, value, tb)
+
+
+if getattr(sys, "frozen", False):
+    sys.excepthook = _frozen_excepthook
 from ui.main_window import MainWindow
 from ui.overlay import RecordingOverlay
 from ui.preview import PreviewWindow
@@ -206,7 +222,7 @@ class MurmurApp:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
 
-        icon_path = os.path.join(os.path.dirname(__file__), "ui", "icons", "murmur.ico")
+        icon_path = os.path.join(config._bundled_dir(), "ui", "icons", "murmur.ico") if getattr(sys, "frozen", False) else os.path.join(os.path.dirname(__file__), "..", "ui", "icons", "murmur.ico")
         self.tray_icon = QSystemTrayIcon(QIcon(icon_path), self.app)
         tray_menu = QMenu()
 

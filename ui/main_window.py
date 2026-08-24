@@ -1,3 +1,4 @@
+from core import config
 """
 Murmur v2 — Main Window
 
@@ -27,7 +28,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(480, 520)
         self.resize(560, 620)
 
-        icon_path = os.path.join(os.path.dirname(__file__), "icons", "murmur.ico")
+        icon_path = config.icon_path("murmur.ico")
         self.setWindowIcon(QIcon(icon_path))
         self.setStyleSheet(get_stylesheet(is_dark=False))
 

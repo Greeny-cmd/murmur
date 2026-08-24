@@ -65,7 +65,24 @@ MIN_DURATION = 0.5  # minimum seconds to transcribe
 # ── Paths ────────────────────────────────────────────────────────────────
 
 import os
+import sys
 DATA_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Murmur")
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# ── Bundled-asset resolution (PyInstaller frozen vs source) ─────────────
+def _bundled_dir():
+    """Return the dir holding read-only bundled assets (icons, etc.).
+
+    In a frozen (PyInstaller) build this is _MEIPASS (the unpacked bundle,
+    `_internal` on onedir builds). In source runs it's the project root.
+    """
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
+
+
+def icon_path(name: str) -> str:
+    """Resolve an icon file bundled under 'ui/icons/<name>'."""
+    return os.path.join(_bundled_dir(), "ui", "icons", name)
 
 SETTINGS_WINDOW_SIZE = None  # persisted by SettingsWindow (window-geometry memory)
