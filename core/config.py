@@ -21,8 +21,7 @@ PARAKEET_THREADS = 4
 
 # ── Hotkey ───────────────────────────────────────────────────────────────
 
-# WritHer uses pynput Key.alt_gr (Right Alt / AltGr) by default
-# On German keyboards, AltGr types @, €, \, | — so Right Ctrl is safer
+# Default dictation key: Right Alt / AltGr (0xA5) — on DE keyboards AltGr
 HOTKEY = 0xA5  # Default: Right Alt / ALTGR (0xA5) — on DE keyboards AltGr
 COMBO_HOTKEY = None  # e.g. (0xA2, 0xA5, 0x52) for Ctrl+Alt+R
 REWRITE_HOTKEY = 0x91  # Scroll Lock — rewrite-selection hotkey (default, single key)

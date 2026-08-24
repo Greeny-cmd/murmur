@@ -1,8 +1,8 @@
 """
 Audio Recorder — captures microphone audio.
 
-Based on WritHer's recorder.py, adapted for PyQt6.
-Uses sounddevice (PortAudio) for cross-platform audio capture.
+Uses sounddevice (PortAudio) for cross-platform audio capture, with native-rate
+resampling to Whisper's 16 kHz before feeding the transcript.
 """
 
 import numpy as np

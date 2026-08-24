@@ -2,7 +2,7 @@
 Text Injector — pastes text into the focused application.
 
 Uses the Win32 clipboard API (via ctypes) for atomic clipboard access.
-This is the same approach WritHer uses — battle-tested and reliable.
+This is a battle-tested clipboard-injection approach — reliable on Windows.
 """
 
 import ctypes

@@ -1,7 +1,7 @@
 """
 Murmur v2 — Main Application
 
-Local voice dictation tool based on WritHer.
+Local voice dictation tool for Windows (PyQt6).
 PyQt6 + Hybrid Design (Material + Apple).
 """
 
@@ -281,7 +281,7 @@ class MurmurApp:
         self._recording = False
         self.recorder.on_audio = None  # Disconnect audio feed
         # ALWAYS use the recorder as the source of truth for the final
-        # transcription (mirrors WritHer). The streaming transcriber is ONLY a
+        # transcription. The streaming transcriber is ONLY a
         # parallel live-preview display and must never feed the final result.
         self.streaming.stop()          # stop live-preview thread (ignore its buffer)
         audio = self.recorder.stop()
@@ -595,7 +595,7 @@ class MurmurApp:
 
     def _on_recording_started(self):
         self.main_window.start_recording()
-        # Position overlay at screen center-bottom (like WritHer)
+        # Position overlay at screen center-bottom.
         self._position_overlay()
 
     def _on_recording_stopped(self):
