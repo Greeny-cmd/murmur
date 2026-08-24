@@ -1,6 +1,9 @@
 MIT License
 
-Copyright (c) 2026 Writher Contributors
+Copyright (c) 2026 Murmur Contributors (Greeny-cmd)
+
+Murmur is a local voice-dictation rewrite derived from WritHer
+(https://github.com/benmaster82/writher), also released under the MIT License.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
