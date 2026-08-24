@@ -24,7 +24,8 @@ writher_icon.png
 recovery_notes.txt
 
 # Development backups and legacy asset scripts
-assets/
+assets/*
+!assets/section-icon.png
 
 # Landing page (hosted separately)
 site/
