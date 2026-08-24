@@ -1,0 +1,7 @@
+# GitHub Sponsors / funding options shown next to the repo ("Sponsor this project").
+# These use external donation links so no GitHub Sponsors verification is needed.
+
+github: # leave empty (no GitHub Sponsors profile)
+custom:
+  - "https://ko-fi.com/greenycmd"
+  - "https://paypal.me/Nguyen3000"
