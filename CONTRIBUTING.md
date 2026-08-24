@@ -1,149 +1,70 @@
-# Contributing to WritHer
+# Contributing to Murmur
 
-Thanks for your interest in contributing! WritHer is a young open-source project and every contribution matters - whether it's code, bug reports, translations, or just feedback.
+Thanks for your interest in contributing! Murmur is a local, offline voice dictation app for Windows.
+Every contribution matters — code, bug reports, translations, docs, or just feedback.
 
-## Getting Started
+## Project basics
 
-### Prerequisites
+- **Language:** English (UI strings can be German/English; code, comments and docs in English).
+- **Stack:** Python 3.12, PyQt6, faster-whisper (CTranslate2), optional Ollama.
+- **Repository:** https://github.com/Greeny-cmd/murmur
+- **License:** MIT
 
-- Python 3.11+
-- Windows 10/11 (current platform)
-- Git
+## Getting started
 
-### Setup
+1. Fork the repo and clone your fork.
+2. Set up the environment:
+   ```bash
+   uv venv .venv
+   uv pip install --python .venv/Scripts/python.exe -r requirements.txt
+   ```
+3. Run the app:
+   ```bash
+   .venv/Scripts/pythonw.exe main.py   # no console
+   # or
+   .venv/Scripts/python.exe main.py    # console output for debugging
+   ```
+4. Hold **AltGr** to dictate, hold **Scroll Lock** to rewrite a selection.
+
+### GPU note
+Whisper/ASR runs on AMD ROCm, NVIDIA CUDA, or CPU fallback. On AMD, faster-whisper
+needs the ROCm CTranslate2 wheel (see the ROCm section in the README). On NVIDIA use the CUDA build.
+
+## Tests
 
 ```bash
-git clone https://github.com/benmaster82/writher.git
-cd writher
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
+.venv/Scripts/python.exe -m pytest
 ```
 
-### Run
+Please keep tests passing before opening a pull request.
 
-```bash
-python main.py
-```
+## How to contribute
 
-WritHer will appear in the system tray. Hold `AltGr` to dictate, hold `Ctrl+R` for assistant mode.
+### Reporting bugs
+Open an [issue](https://github.com/Greeny-cmd/murmur/issues) and include:
 
-## Project Structure
+- Windows version and whether you're on a GPU (ROCm / CUDA / CPU only).
+- ASR engine + model in use (Settings → Speech Model).
+- Steps to reproduce.
+- Relevant log output. Logs are disabled by default; enable **Settings → Behaviour → Logging**,
+  then check `%LOCALAPPDATA%\Murmur\murmur.log`.
 
-```
-main.py              - Entry point, orchestrator, Tk event loop
-config.py            - All default settings
-hotkey.py            - Keyboard listener (hold/toggle modes)
-recorder.py          - Microphone capture (sounddevice)
-transcriber.py       - Speech-to-text (faster-whisper)
-injector.py          - Clipboard paste into active app (Win32 API)
-assistant.py         - Local LLM provider integration + function calling
-database.py          - SQLite storage (notes, appointments, reminders, settings)
-notifier.py          - Toast notifications + reminder scheduler
-widget.py            - Floating pill overlay with animated eyes (Tkinter + PIL)
-notes_window.py      - Notes/Agenda/Reminders viewer (CustomTkinter)
-settings_window.py   - Settings UI (CustomTkinter)
-tray_icon.py         - System tray icon (pystray)
-brand.py             - Pandora Blackboard icon renderer (PIL)
-theme.py             - Unified colour palette and fonts
-locales.py           - i18n string tables (EN, IT)
-logger.py            - Rotating file + console logger
-```
+### Feature requests / ideas
+Open an issue with a clear description of the use case. We keep things 100% local and offline,
+so cloud dependencies are out of scope.
 
-## How to Contribute
+### Code / pull requests
+- Fork + branch, then open a PR with a clear description.
+- Keep changes focused; one feature/fix per PR.
+- `main.py`, `core/` and `ui/` hold the app logic — no legacy fork files.
+- Match the existing code style (PyQt6, clear method names, concise comments).
 
-### Reporting Bugs
+## Design
 
-Open an [issue](https://github.com/benmaster82/writher/issues) with:
+The UI follows a Google Material × Apple HIG hybrid. Reusable design tokens live in
+`ui/design.py`. Dropdowns must use `.activated` (not `currentIndexChanged`) so scrolling
+never silently changes a setting.
 
-- What you expected to happen
-- What actually happened
-- Steps to reproduce
-- Your OS version and Python version
-- Any relevant log output from `writher.log`
+## Code of conduct
 
-### Suggesting Features
-
-Open an issue with the `enhancement` label. Describe the use case and why it would be useful.
-
-### Submitting Code
-
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feat/your-feature`
-3. Make your changes
-4. Test manually (run the app, try the feature)
-5. Commit with a clear message: `git commit -m "feat: add your feature"`
-6. Push to your fork: `git push origin feat/your-feature`
-7. Open a Pull Request
-
-No formal review process - just describe what you changed and why.
-
-## Areas Where Help is Needed
-
-### macOS Port
-
-The following modules use Windows-specific APIs and need macOS equivalents:
-
-- `injector.py` - Uses Win32 clipboard API (ctypes) and `Ctrl+V` simulation
-- `notifier.py` - Uses winotify / PowerShell balloon tips
-- `widget.py` - Uses `WS_EX_NOACTIVATE` and `-transparentcolor` (Windows-only Tk features)
-- `hotkey.py` - Uses pynput (works cross-platform, but key names may differ)
-
-### Linux Port
-
-Same as macOS, plus:
-
-- `injector.py` - Replace with xdotool or xclip + xdotool key simulation
-- `notifier.py` - Replace with libnotify / notify-send
-- `widget.py` - Transparency and click-through may need X11/Wayland specific handling
-
-### New Languages
-
-Adding a language is straightforward:
-
-1. Open `locales.py`
-2. Copy the `"en"` dictionary
-3. Translate all values
-4. Add it with your language code (e.g. `"fr"`, `"de"`, `"es"`)
-
-No code changes needed beyond `locales.py`.
-
-### Local LLM Model Testing
-
-WritHer supports Ollama and OpenAI-compatible local servers. Not all models and chat templates support function calling equally well. If you test one, please report:
-
-- Provider and server version
-- Model name and size (e.g. `llama3.1:8b`)
-- Whether function calling works reliably
-- Any issues with date/time parsing
-- Response time on your hardware
-
-### UI/UX Improvements
-
-The UI uses CustomTkinter with a unified theme defined in `theme.py`. All colours and fonts are centralized there. If you want to improve the look:
-
-- Edit `theme.py` for colours and fonts
-- Edit `notes_window.py` or `settings_window.py` for layout
-- The floating widget (`widget.py`) uses raw Tkinter + PIL - it's more complex but well-commented
-
-## Code Style
-
-- No strict linter enforced, but keep it clean and readable
-- Follow the existing patterns in the codebase
-- Use `log.info()` / `log.error()` for logging (never `print()`)
-- Add i18n strings to `locales.py` for any user-facing text (both EN and IT)
-- Use `theme.py` constants for colours and fonts in UI code
-- Persist user settings via `database.save_setting()` / `database.get_setting()`
-
-## Commit Messages
-
-We use conventional-ish commit messages:
-
-- `feat:` - New feature
-- `fix:` - Bug fix
-- `docs:` - Documentation only
-- `chore:` - Maintenance, dependencies, config
-
-## Questions?
-
-Open an issue or start a discussion. No question is too small.
+Be kind and constructive. Harassment, racism, sexism or similar won't be tolerated.
